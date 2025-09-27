@@ -66,6 +66,15 @@ class YOLOFaceRecognitionSystem:
         self.alarm_status = "SAFE"  # 当前报警状态: SAFE/WARNING
         print("✓ 报警系统初始化成功")
         
+        # 跟踪系统
+        self.tracked_person_index = 0  # 当前跟踪的人物索引
+        self.safe_zone_persons = []  # 安全区人物列表（用于跟踪选择）
+        self.tracking_active = False  # 跟踪是否激活
+        self.last_tracked_position = None  # 上次跟踪的位置 (center_x, center_y)
+        self.tracking_lock_frames = 0  # 跟踪锁定帧数
+        self.position_history = []  # 位置历史记录
+        print("✓ 跟踪系统初始化成功")
+        
         # 初始化虚拟按钮
         self.button_manager = VirtualButtonManager(
             self.detector.input_width(),
@@ -199,6 +208,15 @@ class YOLOFaceRecognitionSystem:
                 if obj.class_id in self.alarm_zone_persons:
                     current_alarm_count += 1
             print(f"  当前报警区人物: {current_alarm_count}")
+        print(f"  跟踪系统: {'激活' if self.tracking_active else '未激活'}")
+        if self.mode == "track":
+            print(f"  安全区人物数: {len(self.safe_zone_persons)}")
+            if self.tracking_active and self.safe_zone_persons:
+                tracked_person = self.safe_zone_persons[self.tracked_person_index]
+                print(f"  当前跟踪目标: {tracked_person['name']} (索引: {self.tracked_person_index})")
+                print(f"  跟踪锁定帧数: {self.tracking_lock_frames}")
+                if self.last_tracked_position:
+                    print(f"  上次位置: {self.last_tracked_position}")
         print("=" * 50)
     
     def _handle_mode_button(self):
@@ -296,6 +314,22 @@ class YOLOFaceRecognitionSystem:
             orange_color = image.Color.from_rgb(255, 165, 0)
             img.draw_string(20, 190, selection_text, color=orange_color, scale=0.8)
         
+        # Track模式下显示跟踪信息
+        if self.mode == "track":
+            if self.safe_zone_persons:
+                if self.tracking_active and self.tracked_person_index < len(self.safe_zone_persons):
+                    tracked_person = self.safe_zone_persons[self.tracked_person_index]
+                    track_text = f"Tracking: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})"
+                    track_color = image.Color.from_rgb(0, 0, 255)  # 蓝色
+                else:
+                    track_text = f"Available: {len(self.safe_zone_persons)} persons"
+                    track_color = image.Color.from_rgb(0, 255, 255)  # 青色
+                img.draw_string(20, 190, track_text, color=track_color, scale=0.8)
+            else:
+                no_target_text = "No safe zone persons to track"
+                gray_color = image.Color.from_rgb(128, 128, 128)
+                img.draw_string(20, 190, no_target_text, color=gray_color, scale=0.8)
+        
         # Recognize模式下显示报警状态
         if self.mode == "recognize" and self.is_alarm_active:
             if self.alarm_status == "WARNING":
@@ -332,6 +366,11 @@ class YOLOFaceRecognitionSystem:
         if self.mode == "recognize":
             self._update_alarm_status()
         
+        # 更新跟踪状态
+        if self.mode == "track":
+            self._update_safe_zone_persons()
+            self._auto_track_output()
+        
         # 绘制检测结果（使用新的动态注册逻辑）
         if detections:
             self._draw_detection_with_selection(img, detections)
@@ -353,7 +392,7 @@ class YOLOFaceRecognitionSystem:
         name = self.next_person_name
         if self.next_person_name == 'Z':
             self.next_person_name = 'A'  # 循环回A
-            else:
+        else:
             self.next_person_name = chr(ord(self.next_person_name) + 1)
         return name
     
@@ -393,16 +432,149 @@ class YOLOFaceRecognitionSystem:
         print(f"🗑️ 已清除 {count} 个注册人物")
     
     def _handle_prev_person(self):
-        """选择上一个检测框"""
-        if self.current_detections:
-            self.selected_detection_index = (self.selected_detection_index - 1) % len(self.current_detections)
-            print(f"⬅️ 选中检测框: {self.selected_detection_index + 1}/{len(self.current_detections)}")
+        """选择上一个目标"""
+        if self.mode == "track":
+            self._handle_prev_track_target()
+        else:
+            # RECORD模式下的原有功能
+            if self.current_detections:
+                self.selected_detection_index = (self.selected_detection_index - 1) % len(self.current_detections)
+                print(f"⬅️ 选中检测框: {self.selected_detection_index + 1}/{len(self.current_detections)}")
     
     def _handle_next_person(self):
-        """选择下一个检测框"""
-        if self.current_detections:
-            self.selected_detection_index = (self.selected_detection_index + 1) % len(self.current_detections)
-            print(f"➡️ 选中检测框: {self.selected_detection_index + 1}/{len(self.current_detections)}")
+        """选择下一个目标"""
+        if self.mode == "track":
+            self._handle_next_track_target()
+            else:
+            # RECORD模式下的原有功能
+            if self.current_detections:
+                self.selected_detection_index = (self.selected_detection_index + 1) % len(self.current_detections)
+                print(f"➡️ 选中检测框: {self.selected_detection_index + 1}/{len(self.current_detections)}")
+    
+    def _handle_prev_track_target(self):
+        """跟踪模式：选择上一个安全区人物"""
+        if not self.safe_zone_persons:
+            print("❌ 没有安全区人物可跟踪")
+            return
+        
+        self.tracked_person_index = (self.tracked_person_index - 1) % len(self.safe_zone_persons)
+        self.tracking_active = True
+        tracked_person = self.safe_zone_persons[self.tracked_person_index]
+        
+        # 重置跟踪锁定，强制切换
+        self.last_tracked_position = tracked_person['center']
+        self.tracking_lock_frames = 30  # 锁定30帧防止跳变
+        
+        print(f"⬅️ 手动切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
+        self._output_tracking_coordinates(tracked_person)
+    
+    def _handle_next_track_target(self):
+        """跟踪模式：选择下一个安全区人物"""
+        if not self.safe_zone_persons:
+            print("❌ 没有安全区人物可跟踪")
+            return
+        
+        self.tracked_person_index = (self.tracked_person_index + 1) % len(self.safe_zone_persons)
+        self.tracking_active = True
+        tracked_person = self.safe_zone_persons[self.tracked_person_index]
+        
+        # 重置跟踪锁定，强制切换
+        self.last_tracked_position = tracked_person['center']
+        self.tracking_lock_frames = 30  # 锁定30帧防止跳变
+        
+        print(f"➡️ 手动切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
+        self._output_tracking_coordinates(tracked_person)
+    
+    def _output_tracking_coordinates(self, person_data):
+        """输出跟踪目标的坐标"""
+        x, y, w, h = person_data['bbox']
+        center_x = x + w // 2  # 中心点X坐标
+        center_y = y + h // 2  # 中心点Y坐标
+        
+        print(f"📍 跟踪坐标 [{person_data['name']}]: 中心点({center_x}, {center_y}) | 边界框({x}, {y}, {w}, {h})")
+    
+    def _update_safe_zone_persons(self):
+        """更新安全区人物列表，按距离排序以保持跟踪稳定性"""
+        current_persons = []
+        
+        for obj in self.current_detections:
+            # 检查是否为已注册人物且不在报警区
+            person_name, similarity = self._recognize_registered_person(obj.class_id, obj.score)
+            if person_name and not (self.is_alarm_active and obj.class_id in self.alarm_zone_persons):
+                center_x = obj.x + obj.w // 2
+                center_y = obj.y + obj.h // 2
+                
+                person_data = {
+                    'name': person_name,
+                    'bbox': (obj.x, obj.y, obj.w, obj.h),
+                    'center': (center_x, center_y),
+                    'confidence': similarity,
+                    'class_id': obj.class_id,
+                    'distance_from_last': float('inf')  # 默认距离
+                }
+                
+                # 如果有上次跟踪位置，计算距离
+                if self.last_tracked_position:
+                    last_x, last_y = self.last_tracked_position
+                    distance = ((center_x - last_x) ** 2 + (center_y - last_y) ** 2) ** 0.5
+                    person_data['distance_from_last'] = distance
+                
+                current_persons.append(person_data)
+        
+        # 如果有跟踪历史，按距离排序以保持跟踪连续性
+        if self.tracking_active and self.last_tracked_position:
+            current_persons.sort(key=lambda p: p['distance_from_last'])
+        
+        self.safe_zone_persons = current_persons
+        
+        # 确保跟踪索引在有效范围内
+        if self.safe_zone_persons and self.tracked_person_index >= len(self.safe_zone_persons):
+            self.tracked_person_index = 0
+        
+        # 如果没有安全区人物，停止跟踪
+        if not self.safe_zone_persons:
+            self.tracking_active = False
+            self.last_tracked_position = None
+            self.tracking_lock_frames = 0
+    
+    def _auto_track_output(self):
+        """自动跟踪输出坐标，使用稳定跟踪逻辑"""
+        if not self.safe_zone_persons:
+            return
+        
+        # 如果还没有激活跟踪，自动选择第一个安全区人物
+        if not self.tracking_active and self.safe_zone_persons:
+            self.tracked_person_index = 0
+            self.tracking_active = True
+            tracked_person = self.safe_zone_persons[0]
+            self.last_tracked_position = tracked_person['center']
+            self.tracking_lock_frames = 30  # 锁定30帧
+            print(f"🎯 自动跟踪: {tracked_person['name']}")
+        
+        # 稳定跟踪逻辑
+        if (self.tracking_active and self.tracked_person_index < len(self.safe_zone_persons)):
+            tracked_person = self.safe_zone_persons[self.tracked_person_index]
+            
+            # 检查是否需要切换跟踪目标（基于距离阈值）
+            if self.last_tracked_position and self.tracking_lock_frames <= 0:
+                distance_threshold = 80  # 距离阈值，超过此距离认为是不同人物
+                if tracked_person['distance_from_last'] > distance_threshold:
+                    # 寻找距离最近的人物
+                    closest_person = min(self.safe_zone_persons, key=lambda p: p['distance_from_last'])
+                    if closest_person['distance_from_last'] < distance_threshold:
+                        # 找到最近的人物，更新跟踪索引
+                        self.tracked_person_index = self.safe_zone_persons.index(closest_person)
+                        tracked_person = closest_person
+                        print(f"🔄 跟踪切换到最近目标: {tracked_person['name']}")
+            
+            # 更新跟踪位置和锁定帧数
+            self.last_tracked_position = tracked_person['center']
+            if self.tracking_lock_frames > 0:
+                self.tracking_lock_frames -= 1
+            
+            # 输出坐标（降低频率，每5帧输出一次）
+            if self.frame_count % 5 == 0:
+                self._output_tracking_coordinates(tracked_person)
     
     def _recognize_registered_person(self, yolo_class_id, confidence):
         """识别已注册的人物"""
@@ -413,8 +585,8 @@ class YOLOFaceRecognitionSystem:
         return None, 0.0
     
     def _draw_detection_with_selection(self, img, detections):
-        """绘制检测结果，报警区红框，安全区绿框，未授权黄框"""
-        for i, obj in enumerate(detections):
+        """绘制检测结果，报警区红框，安全区绿框，未授权黄框，跟踪目标特殊标识"""
+                for i, obj in enumerate(detections):
             x, y, w, h = obj.x, obj.y, obj.w, obj.h
             class_id = obj.class_id
             confidence = obj.score
@@ -423,8 +595,26 @@ class YOLOFaceRecognitionSystem:
             person_name, similarity = self._recognize_registered_person(class_id, confidence)
             is_registered = person_name is not None
             
+            # 检查是否为当前跟踪目标（使用更精确的匹配）
+            is_tracked_target = False
+            if (self.mode == "track" and self.tracking_active and 
+                self.safe_zone_persons and self.tracked_person_index < len(self.safe_zone_persons)):
+                tracked_person = self.safe_zone_persons[self.tracked_person_index]
+                current_center_x = x + w // 2
+                current_center_y = y + h // 2
+                tracked_center_x, tracked_center_y = tracked_person['center']
+                
+                # 使用中心点距离和名称匹配
+                center_distance = ((current_center_x - tracked_center_x) ** 2 + (current_center_y - tracked_center_y) ** 2) ** 0.5
+                if person_name == tracked_person['name'] and center_distance < 30:
+                    is_tracked_target = True
+            
             # 确定框的颜色和粗细
-            if self.mode == "recognize" and self.is_alarm_active and class_id in self.alarm_zone_persons:
+            if is_tracked_target:
+                # 跟踪目标：蓝色框，最粗线条
+                color = image.Color.from_rgb(0, 0, 255)
+                thickness = 4
+            elif self.mode == "recognize" and self.is_alarm_active and class_id in self.alarm_zone_persons:
                 # 报警区内的人物：红色框
                 color = image.Color.from_rgb(255, 0, 0)
                 thickness = 3
@@ -440,11 +630,25 @@ class YOLOFaceRecognitionSystem:
             # 绘制边界框
             img.draw_rect(x, y, w, h, color=color, thickness=thickness)
             
+            # 跟踪目标额外绘制中心点
+            if is_tracked_target:
+                center_x = x + w // 2
+                center_y = y + h // 2
+                # 绘制中心十字标记
+                cross_size = 10
+                img.draw_line(center_x - cross_size, center_y, center_x + cross_size, center_y, 
+                            color=image.Color.from_rgb(0, 0, 255), thickness=2)
+                img.draw_line(center_x, center_y - cross_size, center_x, center_y + cross_size, 
+                            color=image.Color.from_rgb(0, 0, 255), thickness=2)
+            
             # 确定标签内容和颜色
             if is_registered:
                 # 已注册人物：显示字母名称
                 label = f'{person_name}: {similarity:.2f}'
-                if self.mode == "recognize" and self.is_alarm_active and class_id in self.alarm_zone_persons:
+                if is_tracked_target:
+                    label = f'🎯{person_name}: {similarity:.2f}'  # 跟踪目标加特殊标记
+                    label_color = image.Color.from_rgb(0, 0, 255)  # 蓝色文字
+                elif self.mode == "recognize" and self.is_alarm_active and class_id in self.alarm_zone_persons:
                     label_color = image.Color.from_rgb(255, 0, 0)  # 报警区：红色文字
                 else:
                     label_color = image.Color.from_rgb(0, 255, 0)  # 安全区：绿色文字
