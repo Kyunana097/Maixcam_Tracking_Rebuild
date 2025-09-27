@@ -16,8 +16,8 @@ sys.path.append('/root/src/vision/detection')
 sys.path.append('/root/src/vision/recognition')
 
 # 导入，失败则报错
-    from src.vision.detection.person_detector import PersonDetector
-    from src.vision.recognition.cnn_recognizer import CNNRecognizer
+from src.vision.detection.person_detector import PersonDetector
+from src.vision.recognition.cnn_recognizer import CNNRecognizer
 from src.hardware.button import VirtualButtonManager
 print("✓ 成功导入所有模块")
 
@@ -28,30 +28,30 @@ class YOLOFaceRecognitionSystem:
         print("=" * 50)
         
         # 初始化YOLO检测器
-            self.detector = nn.YOLOv5(model="/root/my_own/best.mud", dual_buff=True)
-            print("✓ YOLO检测器初始化成功")
-            print(f"  输入尺寸: {self.detector.input_width()}x{self.detector.input_height()}")
-            print(f"  识别类别: {self.detector.labels}")
+        self.detector = nn.YOLOv5(model="/root/my_own/best.mud", dual_buff=True)
+        print("✓ YOLO检测器初始化成功")
+        print(f"  输入尺寸: {self.detector.input_width()}x{self.detector.input_height()}")
+        print(f"  识别类别: {self.detector.labels}")
         
         # 初始化摄像头
-            self.cam = camera.Camera(
-                self.detector.input_width(), 
-                self.detector.input_height(), 
-                self.detector.input_format()
-            )
-            print(f"✓ 摄像头初始化成功: {self.detector.input_width()}x{self.detector.input_height()}")
+        self.cam = camera.Camera(
+            self.detector.input_width(), 
+            self.detector.input_height(), 
+            self.detector.input_format()
+        )
+        print(f"✓ 摄像头初始化成功: {self.detector.input_width()}x{self.detector.input_height()}")
         
         # 初始化显示器
-            self.dis = display.Display()
-            print("✓ 显示器初始化成功")
+        self.dis = display.Display()
+        print("✓ 显示器初始化成功")
         
         # 初始化人物检测器和识别器
-                self.person_detector = PersonDetector(
-                    camera_width=self.detector.input_width(),
-                    camera_height=self.detector.input_height()
-                )
-                self.recognizer = CNNRecognizer()
-                print("✓ 高级模块初始化成功")
+        self.person_detector = PersonDetector(
+            camera_width=self.detector.input_width(),
+            camera_height=self.detector.input_height()
+        )
+        self.recognizer = CNNRecognizer()
+        print("✓ 高级模块初始化成功")
         
         # 动态人物注册系统
         self.registered_persons = {}  # {person_id: {'name': 'A', 'features': [...], 'yolo_class': 0}}
@@ -70,9 +70,10 @@ class YOLOFaceRecognitionSystem:
         self.tracked_person_index = 0  # 当前跟踪的人物索引
         self.safe_zone_persons = []  # 安全区人物列表（用于跟踪选择）
         self.tracking_active = False  # 跟踪是否激活
-        self.last_tracked_position = None  # 上次跟踪的位置 (center_x, center_y)
-        self.tracking_lock_frames = 0  # 跟踪锁定帧数
-        self.position_history = []  # 位置历史记录
+        self.last_tracked_coordinates = None  # 上次跟踪的坐标 (center_x, center_y, bbox)
+        self.target_lost_frames = 0  # 目标丢失的帧数
+        self.max_lost_frames = 30  # 最大丢失帧数（约1秒@30fps）
+        self.current_target_name = None  # 当前跟踪目标的名称
         print("✓ 跟踪系统初始化成功")
         
         # 初始化虚拟按钮
@@ -211,12 +212,12 @@ class YOLOFaceRecognitionSystem:
         print(f"  跟踪系统: {'激活' if self.tracking_active else '未激活'}")
         if self.mode == "track":
             print(f"  安全区人物数: {len(self.safe_zone_persons)}")
-            if self.tracking_active and self.safe_zone_persons:
-                tracked_person = self.safe_zone_persons[self.tracked_person_index]
-                print(f"  当前跟踪目标: {tracked_person['name']} (索引: {self.tracked_person_index})")
-                print(f"  跟踪锁定帧数: {self.tracking_lock_frames}")
-                if self.last_tracked_position:
-                    print(f"  上次位置: {self.last_tracked_position}")
+            if self.tracking_active and self.current_target_name:
+                print(f"  当前跟踪目标: {self.current_target_name}")
+                print(f"  目标丢失帧数: {self.target_lost_frames}/{self.max_lost_frames}")
+                if self.last_tracked_coordinates:
+                    center_x, center_y, _ = self.last_tracked_coordinates
+                    print(f"  上次坐标: ({center_x}, {center_y})")
         print("=" * 50)
     
     def _handle_mode_button(self):
@@ -316,14 +317,20 @@ class YOLOFaceRecognitionSystem:
         
         # Track模式下显示跟踪信息
         if self.mode == "track":
-            if self.safe_zone_persons:
-                if self.tracking_active and self.tracked_person_index < len(self.safe_zone_persons):
-                    tracked_person = self.safe_zone_persons[self.tracked_person_index]
-                    track_text = f"Tracking: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})"
-                    track_color = image.Color.from_rgb(0, 0, 255)  # 蓝色
+            if self.tracking_active and self.current_target_name:
+                if self.target_lost_frames > 0:
+                    # 目标丢失状态
+                    lost_time = self.target_lost_frames / 30.0  # 转换为秒
+                    track_text = f"Tracking: {self.current_target_name} [LOST {lost_time:.1f}s]"
+                    track_color = image.Color.from_rgb(255, 165, 0)  # 橙色
                 else:
-                    track_text = f"Available: {len(self.safe_zone_persons)} persons"
-                    track_color = image.Color.from_rgb(0, 255, 255)  # 青色
+                    # 正常跟踪状态
+                    track_text = f"Tracking: {self.current_target_name}"
+                    track_color = image.Color.from_rgb(0, 0, 255)  # 蓝色
+                img.draw_string(20, 190, track_text, color=track_color, scale=0.8)
+            elif self.safe_zone_persons:
+                track_text = f"Available: {len(self.safe_zone_persons)} persons"
+                track_color = image.Color.from_rgb(0, 255, 255)  # 青色
                 img.draw_string(20, 190, track_text, color=track_color, scale=0.8)
             else:
                 no_target_text = "No safe zone persons to track"
@@ -347,9 +354,9 @@ class YOLOFaceRecognitionSystem:
         clicked_button = self.button_manager.check_touch_input()
         self.button_manager.update()
         
-            # YOLO检测
-            detections = self.detector.detect(img, conf_th=self.conf_threshold, iou_th=self.iou_threshold)
-            
+        # YOLO检测
+        detections = self.detector.detect(img, conf_th=self.conf_threshold, iou_th=self.iou_threshold)
+        
         # 更新当前检测结果
         self.current_detections = detections if detections else []
         
@@ -357,10 +364,10 @@ class YOLOFaceRecognitionSystem:
         if self.current_detections and self.selected_detection_index >= len(self.current_detections):
             self.selected_detection_index = 0
         
-            # 更新统计
-            self.frame_count += 1
-            if detections:
-                self.detection_count += len(detections)
+        # 更新统计
+        self.frame_count += 1
+        if detections:
+            self.detection_count += len(detections)
             
         # 更新报警状态
         if self.mode == "recognize":
@@ -445,7 +452,7 @@ class YOLOFaceRecognitionSystem:
         """选择下一个目标"""
         if self.mode == "track":
             self._handle_next_track_target()
-            else:
+        else:
             # RECORD模式下的原有功能
             if self.current_detections:
                 self.selected_detection_index = (self.selected_detection_index + 1) % len(self.current_detections)
@@ -461,12 +468,13 @@ class YOLOFaceRecognitionSystem:
         self.tracking_active = True
         tracked_person = self.safe_zone_persons[self.tracked_person_index]
         
-        # 重置跟踪锁定，强制切换
-        self.last_tracked_position = tracked_person['center']
-        self.tracking_lock_frames = 30  # 锁定30帧防止跳变
+        # 重置跟踪状态
+        self.current_target_name = tracked_person['name']
+        self.target_lost_frames = 0
+        self._update_last_coordinates(tracked_person)
         
-        print(f"⬅️ 手动切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
-        self._output_tracking_coordinates(tracked_person)
+        print(f"⬅️ 切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
+        self._output_tracking_coordinates_from_data(tracked_person)
     
     def _handle_next_track_target(self):
         """跟踪模式：选择下一个安全区人物"""
@@ -478,54 +486,54 @@ class YOLOFaceRecognitionSystem:
         self.tracking_active = True
         tracked_person = self.safe_zone_persons[self.tracked_person_index]
         
-        # 重置跟踪锁定，强制切换
-        self.last_tracked_position = tracked_person['center']
-        self.tracking_lock_frames = 30  # 锁定30帧防止跳变
+        # 重置跟踪状态
+        self.current_target_name = tracked_person['name']
+        self.target_lost_frames = 0
+        self._update_last_coordinates(tracked_person)
         
-        print(f"➡️ 手动切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
-        self._output_tracking_coordinates(tracked_person)
+        print(f"➡️ 切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
+        self._output_tracking_coordinates_from_data(tracked_person)
     
     def _output_tracking_coordinates(self, person_data):
-        """输出跟踪目标的坐标"""
+        """输出跟踪目标的坐标（已弃用，使用_output_tracking_coordinates_from_data）"""
+        self._output_tracking_coordinates_from_data(person_data)
+    
+    def _output_tracking_coordinates_from_data(self, person_data):
+        """从person_data输出跟踪坐标"""
         x, y, w, h = person_data['bbox']
-        center_x = x + w // 2  # 中心点X坐标
-        center_y = y + h // 2  # 中心点Y坐标
-        
+        center_x = x + w // 2
+        center_y = y + h // 2
         print(f"📍 跟踪坐标 [{person_data['name']}]: 中心点({center_x}, {center_y}) | 边界框({x}, {y}, {w}, {h})")
     
+    def _output_last_coordinates(self):
+        """输出上次记录的坐标"""
+        if self.last_tracked_coordinates:
+            center_x, center_y, bbox = self.last_tracked_coordinates
+            x, y, w, h = bbox
+            print(f"📍 跟踪坐标 [{self.current_target_name}]: 中心点({center_x}, {center_y}) | 边界框({x}, {y}, {w}, {h}) [LOST]")
+    
+    def _update_last_coordinates(self, person_data):
+        """更新上次跟踪的坐标"""
+        x, y, w, h = person_data['bbox']
+        center_x = x + w // 2
+        center_y = y + h // 2
+        self.last_tracked_coordinates = (center_x, center_y, (x, y, w, h))
+    
     def _update_safe_zone_persons(self):
-        """更新安全区人物列表，按距离排序以保持跟踪稳定性"""
-        current_persons = []
+        """更新安全区人物列表"""
+        self.safe_zone_persons.clear()
         
         for obj in self.current_detections:
             # 检查是否为已注册人物且不在报警区
             person_name, similarity = self._recognize_registered_person(obj.class_id, obj.score)
             if person_name and not (self.is_alarm_active and obj.class_id in self.alarm_zone_persons):
-                center_x = obj.x + obj.w // 2
-                center_y = obj.y + obj.h // 2
-                
                 person_data = {
                     'name': person_name,
                     'bbox': (obj.x, obj.y, obj.w, obj.h),
-                    'center': (center_x, center_y),
                     'confidence': similarity,
-                    'class_id': obj.class_id,
-                    'distance_from_last': float('inf')  # 默认距离
+                    'class_id': obj.class_id
                 }
-                
-                # 如果有上次跟踪位置，计算距离
-                if self.last_tracked_position:
-                    last_x, last_y = self.last_tracked_position
-                    distance = ((center_x - last_x) ** 2 + (center_y - last_y) ** 2) ** 0.5
-                    person_data['distance_from_last'] = distance
-                
-                current_persons.append(person_data)
-        
-        # 如果有跟踪历史，按距离排序以保持跟踪连续性
-        if self.tracking_active and self.last_tracked_position:
-            current_persons.sort(key=lambda p: p['distance_from_last'])
-        
-        self.safe_zone_persons = current_persons
+                self.safe_zone_persons.append(person_data)
         
         # 确保跟踪索引在有效范围内
         if self.safe_zone_persons and self.tracked_person_index >= len(self.safe_zone_persons):
@@ -534,47 +542,48 @@ class YOLOFaceRecognitionSystem:
         # 如果没有安全区人物，停止跟踪
         if not self.safe_zone_persons:
             self.tracking_active = False
-            self.last_tracked_position = None
-            self.tracking_lock_frames = 0
     
     def _auto_track_output(self):
-        """自动跟踪输出坐标，使用稳定跟踪逻辑"""
-        if not self.safe_zone_persons:
-            return
-        
+        """自动跟踪输出坐标，丢失目标时继续输出上次坐标"""
         # 如果还没有激活跟踪，自动选择第一个安全区人物
         if not self.tracking_active and self.safe_zone_persons:
             self.tracked_person_index = 0
             self.tracking_active = True
             tracked_person = self.safe_zone_persons[0]
-            self.last_tracked_position = tracked_person['center']
-            self.tracking_lock_frames = 30  # 锁定30帧
+            self.current_target_name = tracked_person['name']
+            self.target_lost_frames = 0
+            self._update_last_coordinates(tracked_person)
             print(f"🎯 自动跟踪: {tracked_person['name']}")
         
-        # 稳定跟踪逻辑
-        if (self.tracking_active and self.tracked_person_index < len(self.safe_zone_persons)):
-            tracked_person = self.safe_zone_persons[self.tracked_person_index]
+        # 如果跟踪激活，处理坐标输出
+        if self.tracking_active:
+            # 寻找当前目标
+            current_target = None
+            if self.current_target_name:
+                for person in self.safe_zone_persons:
+                    if person['name'] == self.current_target_name:
+                        current_target = person
+                        break
             
-            # 检查是否需要切换跟踪目标（基于距离阈值）
-            if self.last_tracked_position and self.tracking_lock_frames <= 0:
-                distance_threshold = 80  # 距离阈值，超过此距离认为是不同人物
-                if tracked_person['distance_from_last'] > distance_threshold:
-                    # 寻找距离最近的人物
-                    closest_person = min(self.safe_zone_persons, key=lambda p: p['distance_from_last'])
-                    if closest_person['distance_from_last'] < distance_threshold:
-                        # 找到最近的人物，更新跟踪索引
-                        self.tracked_person_index = self.safe_zone_persons.index(closest_person)
-                        tracked_person = closest_person
-                        print(f"🔄 跟踪切换到最近目标: {tracked_person['name']}")
-            
-            # 更新跟踪位置和锁定帧数
-            self.last_tracked_position = tracked_person['center']
-            if self.tracking_lock_frames > 0:
-                self.tracking_lock_frames -= 1
-            
-            # 输出坐标（降低频率，每5帧输出一次）
-            if self.frame_count % 5 == 0:
-                self._output_tracking_coordinates(tracked_person)
+            if current_target:
+                # 找到目标，重置丢失计数并输出坐标
+                self.target_lost_frames = 0
+                self._update_last_coordinates(current_target)
+                self._output_tracking_coordinates_from_data(current_target)
+            else:
+                # 目标丢失，增加丢失帧数
+                self.target_lost_frames += 1
+                
+                if self.target_lost_frames <= self.max_lost_frames:
+                    # 在允许的丢失时间内，继续输出上次坐标
+                    self._output_last_coordinates()
+                else:
+                    # 超过最大丢失时间，停止跟踪
+                    print(f"❌ 目标 [{self.current_target_name}] 丢失超过1秒，停止跟踪")
+                    self.tracking_active = False
+                    self.current_target_name = None
+                    self.last_tracked_coordinates = None
+                    self.target_lost_frames = 0
     
     def _recognize_registered_person(self, yolo_class_id, confidence):
         """识别已注册的人物"""
@@ -586,7 +595,7 @@ class YOLOFaceRecognitionSystem:
     
     def _draw_detection_with_selection(self, img, detections):
         """绘制检测结果，报警区红框，安全区绿框，未授权黄框，跟踪目标特殊标识"""
-                for i, obj in enumerate(detections):
+        for i, obj in enumerate(detections):
             x, y, w, h = obj.x, obj.y, obj.w, obj.h
             class_id = obj.class_id
             confidence = obj.score
@@ -595,19 +604,11 @@ class YOLOFaceRecognitionSystem:
             person_name, similarity = self._recognize_registered_person(class_id, confidence)
             is_registered = person_name is not None
             
-            # 检查是否为当前跟踪目标（使用更精确的匹配）
+            # 检查是否为当前跟踪目标（基于名称匹配）
             is_tracked_target = False
             if (self.mode == "track" and self.tracking_active and 
-                self.safe_zone_persons and self.tracked_person_index < len(self.safe_zone_persons)):
-                tracked_person = self.safe_zone_persons[self.tracked_person_index]
-                current_center_x = x + w // 2
-                current_center_y = y + h // 2
-                tracked_center_x, tracked_center_y = tracked_person['center']
-                
-                # 使用中心点距离和名称匹配
-                center_distance = ((current_center_x - tracked_center_x) ** 2 + (current_center_y - tracked_center_y) ** 2) ** 0.5
-                if person_name == tracked_person['name'] and center_distance < 30:
-                    is_tracked_target = True
+                self.current_target_name and person_name == self.current_target_name):
+                is_tracked_target = True
             
             # 确定框的颜色和粗细
             if is_tracked_target:
@@ -743,8 +744,8 @@ class YOLOFaceRecognitionSystem:
 
 def main():
     """主函数"""
-        system = YOLOFaceRecognitionSystem()
-        system.run()
+    system = YOLOFaceRecognitionSystem()
+    system.run()
 
 if __name__ == "__main__":
     main()
