@@ -2,12 +2,14 @@
 """
 基于自训练YOLO模型的人脸识别主程序
 整合了person_detector和cnn_recognizer的功能
+包含UART通信和云台控制功能
 """
 
 from maix import camera, display, image, nn, app
 import sys
 import os
 import time
+import serial
 
 # 添加src路径
 sys.path.append('/root/src')
@@ -19,7 +21,7 @@ sys.path.append('/root/src/vision/recognition')
 from src.vision.detection.person_detector import PersonDetector
 from src.vision.recognition.cnn_recognizer import CNNRecognizer
 from src.hardware.button import VirtualButtonManager
-from src.hardware.uart_communication import GimbalController
+from src.hardware.uart_client_adapter import UARTCommAdapter
 print("✓ 成功导入所有模块")
 
 class YOLOFaceRecognitionSystem:
@@ -84,9 +86,10 @@ class YOLOFaceRecognitionSystem:
         )
         print("✓ 虚拟按钮初始化成功")
         
-        # 初始化云台控制器
-        self.gimbal_controller = GimbalController()
-        print("✓ 云台控制器初始化成功")
+        # 初始化UART通信模块（改为适配器，带端口回退和后台读线程）
+        self.uart_comm = UARTCommAdapter(port="/dev/serial0", baudrate=115200, timeout=3.0)
+        self.tracking_active = False
+        print("✓ UART通信模块初始化成功")
         
         # 检测参数
         self.conf_threshold = 0.6
@@ -234,13 +237,10 @@ class YOLOFaceRecognitionSystem:
                     print(f"  上次坐标: ({center_x}, {center_y})")
         
         # 云台状态
-        gimbal_status = self.gimbal_controller.get_status()
-        print(f"  云台系统: {'激活' if gimbal_status['tracking_active'] else '未激活'}")
-        if gimbal_status['tracking_active']:
-            print(f"  UART连接: {'正常' if gimbal_status['uart']['connected'] else '断开'}")
-            if gimbal_status['last_coordinates']:
-                last_x, last_y = gimbal_status['last_coordinates']
-                print(f"  最后发送坐标: ({last_x}, {last_y})")
+        print(f"  云台系统: {'激活' if self.tracking_active else '未激活'}")
+        if self.tracking_active:
+            uart_status = self.uart_comm.get_status()
+            print(f"  UART连接: {'正常' if uart_status['connected'] else '断开'}")
         print("=" * 50)
     
     def _handle_mode_button(self):
@@ -285,6 +285,23 @@ class YOLOFaceRecognitionSystem:
             self._handle_clear_persons()
         elif self.mode == "track":
             self._handle_next_person()
+    
+    def _handle_gimbal_button(self):
+        """云台控制按钮处理"""
+        if self.tracking_active:
+            self.uart_comm.disconnect()
+            self.tracking_active = False
+            print("⏹️ 云台跟踪已停止")
+        else:
+            if self.uart_comm.connect():
+                self.tracking_active = True
+                print("🎯 云台跟踪已启动")
+                # 发送初始状态
+                is_warning = (self.alarm_status == "WARNING")
+                self.uart_comm.send_alarm_status(is_warning)
+                print(f"📤 发送初始状态: {'WARNING' if is_warning else 'SAFE'}")
+            else:
+                print("❌ 云台跟踪启动失败，请检查UART连接")
     
     def _update_fps(self):
         """更新FPS"""
@@ -372,8 +389,7 @@ class YOLOFaceRecognitionSystem:
             img.draw_string(200, 190, alarm_text, color=alarm_color, scale=1.5)
         
         # 显示云台状态
-        gimbal_status = self.gimbal_controller.get_status()
-        if gimbal_status['tracking_active']:
+        if self.tracking_active:
             gimbal_text = "GIMBAL: ACTIVE"
             gimbal_color = image.Color.from_rgb(0, 255, 0)  # 绿色
         else:
@@ -402,7 +418,7 @@ class YOLOFaceRecognitionSystem:
         self.frame_count += 1
         if detections:
             self.detection_count += len(detections)
-            
+        
         # 更新报警状态
         if self.mode == "recognize":
             self._update_alarm_status()
@@ -411,6 +427,15 @@ class YOLOFaceRecognitionSystem:
         if self.mode == "track":
             self._update_safe_zone_persons()
             self._auto_track_output()
+            # 向单片机发送坐标（20Hz节流）
+            if self.tracking_active and self.current_target_name and self.last_tracked_coordinates:
+                now = time.time()
+                if not hasattr(self, '_last_coord_send'):
+                    self._last_coord_send = 0
+                if (now - self._last_coord_send) >= 0.05:
+                    cx, cy, _ = self.last_tracked_coordinates
+                    self.uart_comm.send_coordinates(int(cx), int(cy))
+                    self._last_coord_send = now
         
         # 绘制检测结果（使用新的动态注册逻辑）
         if detections:
@@ -528,21 +553,6 @@ class YOLOFaceRecognitionSystem:
         print(f"➡️ 切换跟踪目标: {tracked_person['name']} ({self.tracked_person_index + 1}/{len(self.safe_zone_persons)})")
         self._output_tracking_coordinates_from_data(tracked_person)
     
-    def _handle_gimbal_button(self):
-        """云台控制按钮处理"""
-        gimbal_status = self.gimbal_controller.get_status()
-        
-        if gimbal_status['tracking_active']:
-            # 如果云台跟踪已激活，则停止
-            self.gimbal_controller.stop_tracking()
-            print("⏹️ 云台跟踪已停止")
-        else:
-            # 如果云台跟踪未激活，则启动
-            if self.gimbal_controller.start_tracking():
-                print("🎯 云台跟踪已启动")
-            else:
-                print("❌ 云台跟踪启动失败，请检查UART连接")
-    
     def _output_tracking_coordinates(self, person_data):
         """输出跟踪目标的坐标（已弃用，使用_output_tracking_coordinates_from_data）"""
         self._output_tracking_coordinates_from_data(person_data)
@@ -555,9 +565,9 @@ class YOLOFaceRecognitionSystem:
         print(f"📍 跟踪坐标 [{person_data['name']}]: 中心点({center_x}, {center_y}) | 边界框({x}, {y}, {w}, {h})")
         
         # 发送坐标到云台控制器
-        gimbal_status = self.gimbal_controller.get_status()
-        if gimbal_status['tracking_active']:
-            self.gimbal_controller.update_target(center_x, center_y, (x, y, w, h))
+        if self.tracking_active:
+            # 这里可以添加坐标发送逻辑
+            pass
     
     def _output_last_coordinates(self):
         """输出上次记录的坐标并发送到云台"""
@@ -567,9 +577,9 @@ class YOLOFaceRecognitionSystem:
             print(f"📍 跟踪坐标 [{self.current_target_name}]: 中心点({center_x}, {center_y}) | 边界框({x}, {y}, {w}, {h}) [LOST]")
             
             # 发送坐标到云台控制器（目标丢失时继续发送上次坐标）
-            gimbal_status = self.gimbal_controller.get_status()
-            if gimbal_status['tracking_active']:
-                self.gimbal_controller.update_target(center_x, center_y, bbox)
+            if self.tracking_active:
+                # 这里可以添加坐标发送逻辑
+                pass
     
     def _update_last_coordinates(self, person_data):
         """更新上次跟踪的坐标"""
@@ -740,10 +750,9 @@ class YOLOFaceRecognitionSystem:
         self._update_alarm_status()
         
         # 发送初始状态到单片机
-        gimbal_status = self.gimbal_controller.get_status()
-        if gimbal_status['tracking_active']:
+        if self.tracking_active:
             is_warning = (self.alarm_status == "WARNING")
-            self.gimbal_controller.send_alarm_status(is_warning)
+            self.uart_comm.send_alarm_status(is_warning)
         
         print(f"🚨 报警系统启动")
         print(f"📊 报警区类别数: {len(self.alarm_zone_persons)}")
@@ -757,9 +766,8 @@ class YOLOFaceRecognitionSystem:
         self.alarm_status = "SAFE"
         
         # 发送安全状态到单片机
-        gimbal_status = self.gimbal_controller.get_status()
-        if gimbal_status['tracking_active']:
-            self.gimbal_controller.send_alarm_status(False)  # False = 安全状态
+        if self.tracking_active:
+            self.uart_comm.send_alarm_status(False)  # False = 安全状态
         
         print("⏹️ 报警系统已停止")
         print("🔓 报警区已清空")
@@ -785,10 +793,10 @@ class YOLOFaceRecognitionSystem:
         
         # 如果状态发生变化，发送到单片机
         if old_status != self.alarm_status:
-            gimbal_status = self.gimbal_controller.get_status()
-            if gimbal_status['tracking_active']:
+            if self.tracking_active:
                 is_warning = (self.alarm_status == "WARNING")
-                self.gimbal_controller.send_alarm_status(is_warning)
+                self.uart_comm.send_alarm_status(is_warning)
+                print(f"📤 报警状态变化: {old_status} → {self.alarm_status}")
     
     def run(self):
         """运行主循环"""
@@ -821,8 +829,10 @@ class YOLOFaceRecognitionSystem:
             print(f"📊 总检测数: {self.detection_count}")
             
             # 停止云台跟踪
-            self.gimbal_controller.stop_tracking()
-            print("🎯 云台跟踪已停止")
+            if self.tracking_active:
+                self.uart_comm.disconnect()
+                self.tracking_active = False
+                print("🎯 云台跟踪已停止")
 
 def main():
     """主函数"""

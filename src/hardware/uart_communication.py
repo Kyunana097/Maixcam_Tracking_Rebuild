@@ -12,12 +12,12 @@ from typing import Optional, Tuple
 class UARTCommunication:
     """UART通信类，负责与单片机进行数据交换"""
     
-    def __init__(self, port: str = "/dev/ttyS1", baudrate: int = 115200, timeout: float = 1.0):
+    def __init__(self, port: str = "/dev/serial0", baudrate: int = 115200, timeout: float = 3.0):
         """
         初始化UART通信
         
         Args:
-            port: 串口设备路径，默认/dev/ttyS1
+            port: 串口设备路径，默认/dev/serial0
             baudrate: 波特率，默认115200
             timeout: 超时时间，默认1秒
         """
@@ -52,6 +52,7 @@ class UARTCommunication:
             if self.serial_conn and self.serial_conn.is_open:
                 self.serial_conn.close()
             
+            # 使用与调试脚本完全相同的配置
             self.serial_conn = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
@@ -62,7 +63,11 @@ class UARTCommunication:
             )
             
             # 等待串口稳定
-            time.sleep(0.1)
+            time.sleep(0.5)
+            
+            # 清空缓冲区
+            self.serial_conn.flushInput()
+            self.serial_conn.flushOutput()
             
             # 尝试握手验证
             if self._handshake():
@@ -90,27 +95,36 @@ class UARTCommunication:
             print("🔌 UART连接已断开")
     
     def _handshake(self) -> bool:
-        """
-        与单片机进行握手验证
-        
-        Returns:
-            bool: 握手是否成功
-        """
         try:
-            # 发送握手请求
-            self.serial_conn.write(bytes([self.HANDSHAKE_REQUEST]))
-            self.serial_conn.flush()
+            print(f"🔍 串口状态: 已连接, 端口={self.port}")
+
+            # 清空缓冲区 - 与测试脚本一致
+            self.serial_conn.flushInput()
+            self.serial_conn.flushOutput()
+            
+            print("📤 发送 0x55")
+            self.serial_conn.write(b'\x55')  # 与测试脚本完全一致的发送方式
             time.sleep(0.1)
-            
-            # 等待握手响应
-            if self.serial_conn.in_waiting > 0:
-                response = self.serial_conn.read(1)
-                if response and response[0] == self.HANDSHAKE_RESPONSE:
-                    self.last_handshake_time = time.time()
-                    return True
-            
+
+            print("⏳ 等待握手响应...")
+            for i in range(20):
+                time.sleep(0.1)
+                if self.serial_conn.in_waiting > 0:
+                    response = self.serial_conn.read(self.serial_conn.in_waiting)
+                    print(f"📥 收到响应: {[hex(b) for b in response]}")
+
+                    # 与测试脚本完全一致的检查方式
+                    if 0xAA in response:
+                        self.last_handshake_time = time.time()
+                        print("✅ 握手成功！")
+                        return True
+                    else:
+                        print(f"❌ 收到数据但不是0xAA: {[hex(b) for b in response]}")
+                        return False
+
+            print("❌ 无响应 (等待时间: 2.0s, in_waiting=0)")
             return False
-            
+
         except Exception as e:
             print(f"❌ 握手失败: {e}")
             return False
@@ -120,8 +134,8 @@ class UARTCommunication:
         发送坐标数据到单片机
         
         Args:
-            x: X坐标 (0-65535)
-            y: Y坐标 (0-65535)
+            x: X坐标 (0-512
+            y: Y坐标 (0-320
             
         Returns:
             bool: 发送是否成功
@@ -338,7 +352,7 @@ class UARTCommunication:
 class GimbalController:
     """云台控制器，封装UART通信和云台控制逻辑"""
     
-    def __init__(self, uart_port: str = "/dev/ttyS1", uart_baudrate: int = 115200):
+    def __init__(self, uart_port: str = "/dev/serial0", uart_baudrate: int = 115200):
         """
         初始化云台控制器
         
