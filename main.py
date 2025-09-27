@@ -376,7 +376,7 @@ class YOLOFaceRecognitionSystem:
         # 更新跟踪状态
         if self.mode == "track":
             self._update_safe_zone_persons()
-            self._track_output()
+            self._auto_track_output()
         
         # 绘制检测结果（使用新的动态注册逻辑）
         if detections:
@@ -535,12 +535,27 @@ class YOLOFaceRecognitionSystem:
                 }
                 self.safe_zone_persons.append(person_data)
         
-        # 不再自动调整跟踪索引或停止跟踪
-        # 让目标丢失处理逻辑来处理这些情况
+        # 确保跟踪索引在有效范围内
+        if self.safe_zone_persons and self.tracked_person_index >= len(self.safe_zone_persons):
+            self.tracked_person_index = 0
+        
+        # 如果没有安全区人物，停止跟踪
+        if not self.safe_zone_persons:
+            self.tracking_active = False
     
-    def _track_output(self):
-        """处理跟踪输出坐标，丢失目标时继续输出上次坐标"""
-        # 只有在手动激活跟踪后才处理坐标输出
+    def _auto_track_output(self):
+        """自动跟踪输出坐标，丢失目标时继续输出上次坐标"""
+        # 如果还没有激活跟踪，自动选择第一个安全区人物
+        if not self.tracking_active and self.safe_zone_persons:
+            self.tracked_person_index = 0
+            self.tracking_active = True
+            tracked_person = self.safe_zone_persons[0]
+            self.current_target_name = tracked_person['name']
+            self.target_lost_frames = 0
+            self._update_last_coordinates(tracked_person)
+            print(f"🎯 自动跟踪: {tracked_person['name']}")
+        
+        # 如果跟踪激活，处理坐标输出
         if self.tracking_active:
             # 寻找当前目标
             current_target = None
@@ -632,7 +647,7 @@ class YOLOFaceRecognitionSystem:
                 # 已注册人物：显示字母名称
                 label = f'{person_name}: {similarity:.2f}'
                 if is_tracked_target:
-                    label = f'🎯{person_name}: {similarity:.2f}'  # 跟踪目标加特殊标记
+                    label = f'[T]{person_name}: {similarity:.2f}'  # 跟踪目标加特殊标记
                     label_color = image.Color.from_rgb(0, 0, 255)  # 蓝色文字
                 elif self.mode == "recognize" and self.is_alarm_active and class_id in self.alarm_zone_persons:
                     label_color = image.Color.from_rgb(255, 0, 0)  # 报警区：红色文字
