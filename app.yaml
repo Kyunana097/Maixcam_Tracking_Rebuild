@@ -1,0 +1,10 @@
+id: test_face
+name: 测测face
+version: 1.0.0
+author: Kyunana
+icon: ''
+desc: ccb
+files:
+  - best.cvimodel
+  - best.mud
+  - main.py
